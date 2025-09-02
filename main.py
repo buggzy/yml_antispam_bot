@@ -133,20 +133,19 @@ async def main() -> None:
     async def cmd_start(message: Message) -> None:
         await message.reply("Бот антиспама активен. Добавьте меня администратором группы с правами удаления сообщений.")
 
-    @dp.message(F.text)
-    async def on_text(message: Message) -> None:
+    async def process_text_content(message: Message, text_value: str) -> None:
         if debug_mode:
             logging.debug(
                 "Incoming message: chat_id=%s user_id=%s text=%r",
                 getattr(message.chat, "id", None),
                 getattr(getattr(message, "from_user", None), "id", None),
-                (message.text or "")[:500],
+                (text_value or "")[:500],
             )
         # Игнорируем собственные сообщения бота и команды
-        if message.from_user and (message.from_user.is_bot or (message.text and message.text.startswith("/"))):
+        if message.from_user and (message.from_user.is_bot or (text_value and text_value.startswith("/"))):
             return
 
-        text = message.text or ""
+        text = text_value or ""
         if not text.strip():
             return
 
@@ -170,7 +169,7 @@ async def main() -> None:
         )
         reason_text = reason or "нарушение правил"
 
-        # Удаляем исходное сообщение
+        # Удаляем сообщение (исходное или отредактированное)
         try:
             await message.delete()
         except Exception:
@@ -198,6 +197,24 @@ async def main() -> None:
                 pass
 
         asyncio.create_task(delete_notice_later(chat_id, notice_msg.message_id))
+
+    @dp.message(F.text)
+    async def on_text(message: Message) -> None:
+        await process_text_content(message, message.text or "")
+
+    @dp.edited_message(F.text)
+    async def on_edited_text(message: Message) -> None:
+        await process_text_content(message, message.text or "")
+
+    # Подписи к фото (новые сообщения)
+    @dp.message(F.photo & F.caption)
+    async def on_photo_caption(message: Message) -> None:
+        await process_text_content(message, message.caption or "")
+
+    # Редактирование подписи к медиа (включая фото)
+    @dp.edited_message(F.caption)
+    async def on_edited_caption(message: Message) -> None:
+        await process_text_content(message, message.caption or "")
 
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
