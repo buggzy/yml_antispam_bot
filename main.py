@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Set
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.utils.markdown import hbold
@@ -121,6 +121,7 @@ async def main() -> None:
 
     settings = load_settings(os.path.join(os.path.dirname(__file__), "settings.json"))
     rules = settings.get("forbidden_topics", [])
+    group_command = str(settings.get("group_command", "yml_antispam")).strip() or "yml_antispam"
     if not isinstance(rules, list) or not rules:
         raise RuntimeError("В settings.json отсутствуют правила forbidden_topics")
 
@@ -134,22 +135,43 @@ async def main() -> None:
     bot_id: int = me.id
     admin_loss_notified_chats: Set[int] = set()
 
-    async def bot_is_admin(chat_id: int) -> bool:
+    async def get_bot_rights(chat_id: int) -> Tuple[bool, bool]:
+        """Возвращает (is_admin, can_delete_messages)."""
         try:
             member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
             status = getattr(member, "status", None)
-            return str(status) in {"administrator", "creator"}
+            # Нормализуем статус к строке
+            if isinstance(status, ChatMemberStatus):
+                status_str = status.value
+            else:
+                status_str = str(status)
+            if status_str == "creator":
+                return True, True
+            if status_str == "administrator":
+                return True, bool(getattr(member, "can_delete_messages", False))
+            return False, False
         except Exception:
-            return False
+            return False, False
 
+    # В личке реагируем на /start
     @dp.message(Command("start"))
     async def cmd_start(message: Message) -> None:
+        chat_type = getattr(message.chat, "type", "") if message.chat else ""
+        if chat_type == "private":
+            await message.reply("Бот антиспама активен. Добавьте меня администратором группы с правами удаления сообщений.")
+        # В группах игнорируем /start
+
+    # В группах реагируем на команду из settings
+    @dp.message(Command(group_command))
+    async def cmd_group_info(message: Message) -> None:
         chat_id = getattr(message.chat, "id", None)
         chat_type = getattr(message.chat, "type", "") if message.chat else ""
-        if chat_id and chat_type in {"group", "supergroup"} and await bot_is_admin(chat_id):
-            await message.reply("Бот антиспама активен.")
-        else:
-            await message.reply("Бот антиспама активен. Добавьте меня администратором группы с правами удаления сообщений.")
+        if chat_id and chat_type in {"group", "supergroup"}:
+            is_admin, can_delete = await get_bot_rights(chat_id)
+            if is_admin and can_delete:
+                await message.reply("Бот антиспама активен.")
+            else:
+                await message.reply("Боту нужны права администратора с удалением сообщений.")
 
     async def process_text_content(message: Message, text_value: str) -> None:
         if debug_mode:
@@ -197,14 +219,15 @@ async def main() -> None:
             chat_id_for_perm = getattr(message.chat, "id", None)
             if chat_id_for_perm is not None:
                 try:
-                    if not await bot_is_admin(chat_id_for_perm) and chat_id_for_perm not in admin_loss_notified_chats:
+                    is_admin, can_delete = await get_bot_rights(chat_id_for_perm)
+                    if (not can_delete) and chat_id_for_perm not in admin_loss_notified_chats:
                         admin_loss_notified_chats.add(chat_id_for_perm)
                         try:
                             await bot.send_message(
                                 chat_id=chat_id_for_perm,
                                 text=(
-                                    "Не могу удалять сообщения: у меня нет прав администратора. "
-                                    "Пожалуйста, верните права, чтобы модерация работала."
+                                    "Не могу удалять сообщения: у меня нет права администратора на удаление. "
+                                    "Верните права, чтобы модерация работала."
                                 ),
                             )
                         except Exception:
