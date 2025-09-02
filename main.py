@@ -102,10 +102,7 @@ async def main() -> None:
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     openai_key = os.getenv("OPENAI_API_KEY")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    system_prompt = os.getenv(
-        "SYSTEM_PROMPT",
-        "Ты модератор чата. Верни ТОЛЬКО JSON с ключами is_forbidden и reason.",
-    )
+    system_prompt = "Ты модератор чата. Верни ТОЛЬКО JSON с ключами is_forbidden и reason."
     debug_mode = get_bool_env("DEBUG", False)
 
     logging.basicConfig(

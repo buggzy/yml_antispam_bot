@@ -22,7 +22,6 @@ pip install -r requirements.txt
 TELEGRAM_BOT_TOKEN=123456:ABC...
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
-SYSTEM_PROMPT=Ты модератор чата. Верни ТОЛЬКО JSON с ключами is_forbidden и reason.
 # опционально
 DEBUG=false
 ```
