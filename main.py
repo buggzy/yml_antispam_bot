@@ -2,7 +2,7 @@ import asyncio
 import logging
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
@@ -129,9 +129,27 @@ async def main() -> None:
     bot = Bot(token=telegram_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
+    # Кэшируем идентификатор бота и храним флаги уведомлений о потере прав на чат
+    me = await bot.get_me()
+    bot_id: int = me.id
+    admin_loss_notified_chats: Set[int] = set()
+
+    async def bot_is_admin(chat_id: int) -> bool:
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
+            status = getattr(member, "status", None)
+            return str(status) in {"administrator", "creator"}
+        except Exception:
+            return False
+
     @dp.message(Command("start"))
     async def cmd_start(message: Message) -> None:
-        await message.reply("Бот антиспама активен. Добавьте меня администратором группы с правами удаления сообщений.")
+        chat_id = getattr(message.chat, "id", None)
+        chat_type = getattr(message.chat, "type", "") if message.chat else ""
+        if chat_id and chat_type in {"group", "supergroup"} and await bot_is_admin(chat_id):
+            await message.reply("Бот антиспама активен.")
+        else:
+            await message.reply("Бот антиспама активен. Добавьте меня администратором группы с правами удаления сообщений.")
 
     async def process_text_content(message: Message, text_value: str) -> None:
         if debug_mode:
@@ -175,6 +193,24 @@ async def main() -> None:
         except Exception:
             if debug_mode:
                 logging.exception("Failed to delete violating message")
+            # Проверим права администратора и, если прав нет, оповестим один раз на чат
+            chat_id_for_perm = getattr(message.chat, "id", None)
+            if chat_id_for_perm is not None:
+                try:
+                    if not await bot_is_admin(chat_id_for_perm) and chat_id_for_perm not in admin_loss_notified_chats:
+                        admin_loss_notified_chats.add(chat_id_for_perm)
+                        try:
+                            await bot.send_message(
+                                chat_id=chat_id_for_perm,
+                                text=(
+                                    "Не могу удалять сообщения: у меня нет прав администратора. "
+                                    "Пожалуйста, верните права, чтобы модерация работала."
+                                ),
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             # Нет прав — выходим
             return
 
