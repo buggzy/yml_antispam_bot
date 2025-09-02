@@ -15,6 +15,14 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
+# Совместимость: asyncio.to_thread недоступен в Python < 3.9
+try:  # Python 3.9+
+    _to_thread = asyncio.to_thread  # type: ignore[attr-defined]
+except AttributeError:  # Python 3.8
+    async def _to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
 class ModerationClient:
     """Обёртка для вызова OpenAI с возвратом структурированного результата."""
 
@@ -58,7 +66,7 @@ class ModerationClient:
             )
             return response.choices[0].message.content or "{}"
 
-        content = await asyncio.to_thread(_sync_call)
+        content = await _to_thread(_sync_call)
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
