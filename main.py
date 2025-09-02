@@ -37,7 +37,11 @@ class ModerationClient:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         retry=retry_if_exception_type(Exception),
     )
-    async def classify(self, text: str, rules: List[Dict[str, str]]) -> Tuple[bool, Optional[str]]:
+    async def classify(
+        self,
+        text: str,
+        rules: List[Dict[str, str]],
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[List[bool]]]:
         """
         Возвращает (is_forbidden, reason). reason должен быть одним из значений reason из правил.
         """
@@ -45,10 +49,11 @@ class ModerationClient:
         rules_json = json.dumps(rules, ensure_ascii=False)
         user_prompt = (
             "Тебе дан список правил в формате JSON со структурами {\"prompt\": str, \"reason\": str}.\n" \
-            "Текст сообщения ниже.\n" \
-            "Определи, нарушает ли сообщение какое-либо правило по смыслу (даже если нет точных совпадений слов).\n" \
-            "Если нарушает, верни строго JSON вида {\"is_forbidden\": true, \"reason\": \"<одно из reason из списка>\"}.\n" \
-            "Если нет, верни строго {\"is_forbidden\": false}. Никакого другого текста не пиши.\n\n" \
+            "Ниже дан текст сообщения.\n\n" \
+            "Верни СТРОГО JSON:\n" \
+            "{\n  \"decisions\": [true|false, ...]  // по одному boolean на каждое правило из списка, в том же порядке,\n" \
+            "  \"rationale\": \"краткое обоснование решения в свободной форме\"\n}\n\n" \
+            "Если массив decisions отсутствует, верни хотя бы {\"decisions\": []}.\n" \
             f"Правила: {rules_json}\n" \
             f"Сообщение: {text}"
         )
@@ -81,8 +86,37 @@ class ModerationClient:
             else:
                 data = {"is_forbidden": False}
 
-        is_forbidden = bool(data.get("is_forbidden", False))
-        reason = data.get("reason") if is_forbidden else None
+        # Попытка новой схемы: decisions[] и rationale
+        decisions_raw = data.get("decisions")
+        rationale: Optional[str] = None
+        decisions_out: Optional[List[bool]] = None
+        is_forbidden: bool
+        reason: Optional[str]
+
+        if isinstance(decisions_raw, list):
+            # нормализуем длину и типы
+            decisions_bool: List[bool] = []
+            for i, v in enumerate(decisions_raw[: len(rules)]):
+                decisions_bool.append(bool(v))
+            if len(decisions_bool) < len(rules):
+                decisions_bool.extend([False] * (len(rules) - len(decisions_bool)))
+
+            is_forbidden = any(decisions_bool)
+            decisions_out = decisions_bool
+            reason = None
+            if is_forbidden:
+                try:
+                    first_idx = next(idx for idx, val in enumerate(decisions_bool) if val)
+                    reason = rules[first_idx].get("reason")  # type: ignore[union-attr]
+                except StopIteration:
+                    reason = None
+            rationale = data.get("rationale") if isinstance(data.get("rationale"), str) else None
+        else:
+            # fallback к старой схеме {is_forbidden, reason}
+            is_forbidden = bool(data.get("is_forbidden", False))
+            reason = data.get("reason") if is_forbidden else None
+            rationale = None
+            decisions_out = None
 
         # Если reason не из словаря, обнулим
         allowed_reasons = {item["reason"] for item in rules}
@@ -90,7 +124,7 @@ class ModerationClient:
             # Попробуем маппинг по самому близкому prompt через простую эвристику (падение назад)
             reason = next(iter(allowed_reasons), None)
 
-        return is_forbidden, reason
+        return is_forbidden, reason, rationale, decisions_out
 
 
 def load_settings(path: str) -> Dict[str, Any]:
@@ -195,7 +229,10 @@ async def main() -> None:
             return
 
         try:
-            is_forbidden, reason = await moderation.classify(text=text, rules=rules)
+            is_forbidden, reason, rationale, decisions = await moderation.classify(
+                text=text,
+                rules=rules,
+            )
         except Exception:
             if debug_mode:
                 logging.exception("OpenAI classify failed")
@@ -203,7 +240,13 @@ async def main() -> None:
             return
 
         if debug_mode:
-            logging.debug("Classification result: forbidden=%s reason=%r", is_forbidden, reason)
+            logging.debug(
+                "Classification result: forbidden=%s reason=%r rationale=%r decisions=%r",
+                is_forbidden,
+                reason,
+                rationale,
+                decisions,
+            )
 
         if not is_forbidden:
             return
