@@ -45,10 +45,11 @@ class ModerationClient:
         """
         Возвращает (is_forbidden, reason). reason должен быть одним из значений reason из правил.
         """
-        # Формируем инструкцию с явным списком правил
-        rules_json = json.dumps(rules, ensure_ascii=False)
+        # Формируем инструкцию только с prompt'ами, убираем reason из промпта
+        rules_prompts_only = [{"prompt": rule["prompt"]} for rule in rules]
+        rules_json = json.dumps(rules_prompts_only, ensure_ascii=False)
         user_prompt = (
-            "Тебе дан список правил в формате JSON со структурами {\"prompt\": str, \"reason\": str}.\n" \
+            "Тебе дан список правил в формате JSON со структурами {\"prompt\": str}.\n" \
             "Ниже дан текст сообщения.\n\n" \
             "Верни СТРОГО JSON:\n" \
             "{\n  \"decisions\": [true|false, ...]  // по одному boolean на каждое правило из списка, в том же порядке,\n" \
