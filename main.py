@@ -4,6 +4,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple, Set
 from datetime import datetime
+import re
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
@@ -177,6 +178,42 @@ async def main() -> None:
             if debug_mode:
                 logging.exception("Failed to write LLM JSON log")
 
+    def extract_urls(message: Message, source_text: str) -> List[str]:
+        """Возвращает список URL из entities/caption_entities и из текста (regex)."""
+        urls: List[str] = []
+
+        def add(url: Optional[str]) -> None:
+            if isinstance(url, str) and url and url not in urls:
+                urls.append(url)
+
+        def from_entities(entities: Optional[List[Any]], text: str) -> None:
+            if not entities:
+                return
+            for ent in entities:
+                ent_type = getattr(ent, "type", None)
+                if ent_type == "text_link":
+                    add(getattr(ent, "url", None))
+                elif ent_type == "url":
+                    try:
+                        start = int(getattr(ent, "offset", 0))
+                        length = int(getattr(ent, "length", 0))
+                        if length > 0 and 0 <= start < len(text):
+                            add(text[start : start + length])
+                    except Exception:
+                        pass
+
+        # Извлекаем из entities (текст) и caption_entities (подпись)
+        from_entities(getattr(message, "entities", None), source_text)
+        from_entities(getattr(message, "caption_entities", None), getattr(message, "caption", "") or "")
+
+        # Regex-поиск в самом тексте (на случай, если entities отсутствуют)
+        for m in re.findall(r"https?://[^\s)>\]\}]+", source_text):
+            add(m)
+        for m in re.findall(r"\bwww\.[^\s)>\]\}]+", source_text):
+            add("http://" + m)
+
+        return urls[:20]
+
     if not telegram_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
     if not openai_key:
@@ -252,6 +289,12 @@ async def main() -> None:
         if not text.strip():
             return
 
+        # Подготавливаем текст для LLM: добавляем явный перечень ссылок из entities
+        urls_found = extract_urls(message, text)
+        text_for_llm = text
+        if urls_found:
+            text_for_llm = f"{text}\n\n[links]: {' '.join(urls_found)}"
+
         # Логируем вход для ИИ в отдельный JSONL (если включено)
         if llm_log_path:
             try:
@@ -262,7 +305,8 @@ async def main() -> None:
                         "event": "llm_input",
                         "chat_id": getattr(message.chat, "id", None),
                         "user_id": getattr(getattr(message, "from_user", None), "id", None),
-                        "text": text[:4000],
+                        "text": text_for_llm[:4000],
+                        "urls": urls_found,
                         "rules": [r.get("prompt") for r in rules if isinstance(r, dict)],
                     },
                 )
@@ -272,7 +316,7 @@ async def main() -> None:
 
         try:
             is_forbidden, reason, rationale, decisions = await moderation.classify(
-                text=text,
+                text=text_for_llm,
                 rules=rules,
             )
         except Exception:
