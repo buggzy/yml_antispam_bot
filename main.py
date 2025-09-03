@@ -178,6 +178,78 @@ async def main() -> None:
             if debug_mode:
                 logging.exception("Failed to write LLM JSON log")
 
+    def render_message_markdown(message: Message, source_text: str) -> str:
+        """Рендерит текст сообщения в Markdown с учётом entities/caption_entities."""
+        text = source_text or ""
+        if not text:
+            return text
+
+        # Выбираем набор entities, соответствующий source_text
+        entities: Optional[List[Any]] = None
+        try:
+            if getattr(message, "text", None) == source_text:
+                entities = getattr(message, "entities", None)
+            elif getattr(message, "caption", None) == source_text:
+                entities = getattr(message, "caption_entities", None)
+        except Exception:
+            entities = getattr(message, "entities", None)
+
+        if not entities:
+            return text
+
+        # Применяем замены справа-налево, чтобы не сбивать offset'ы
+        def apply_replacement(s: str, start: int, end: int, replacement: str) -> str:
+            return s[:start] + replacement + s[end:]
+
+        # Сортируем по offset убыв.
+        entities_sorted = sorted(entities, key=lambda e: int(getattr(e, "offset", 0)), reverse=True)
+        for ent in entities_sorted:
+            try:
+                ent_type = getattr(ent, "type", None)
+                start = int(getattr(ent, "offset", 0))
+                length = int(getattr(ent, "length", 0))
+                if length <= 0 or start < 0 or start >= len(text):
+                    continue
+                end = min(len(text), start + length)
+                segment = text[start:end]
+
+                if ent_type == "bold":
+                    rep = f"**{segment}**"
+                elif ent_type == "italic":
+                    rep = f"*{segment}*"
+                elif ent_type == "underline":
+                    rep = f"__{segment}__"
+                elif ent_type == "strikethrough":
+                    rep = f"~~{segment}~~"
+                elif ent_type == "code":
+                    rep = f"`{segment}`"
+                elif ent_type == "pre":
+                    lang = getattr(ent, "language", None) or ""
+                    lang_line = lang if isinstance(lang, str) else ""
+                    rep = f"```{lang_line}\n{segment}\n```"
+                elif ent_type == "text_link":
+                    url = getattr(ent, "url", None)
+                    rep = f"[{segment}]({url})" if isinstance(url, str) and url else segment
+                elif ent_type == "url":
+                    rep = f"<{segment}>"
+                elif ent_type == "text_mention":
+                    user = getattr(ent, "user", None)
+                    name = getattr(user, "full_name", None) or getattr(user, "first_name", None) or segment
+                    user_id = getattr(user, "id", None)
+                    href = f"tg://user?id={user_id}" if user_id is not None else None
+                    rep = f"[{name}]({href})" if href else name
+                elif ent_type == "spoiler":
+                    rep = f"||{segment}||"
+                else:
+                    rep = segment
+
+                text = apply_replacement(text, start, end, rep)
+            except Exception:
+                # В случае ошибки по конкретной entity, оставляем как есть
+                continue
+
+        return text
+
     def extract_urls(message: Message, source_text: str) -> List[str]:
         """Возвращает список URL из entities/caption_entities и из текста (regex)."""
         urls: List[str] = []
@@ -291,9 +363,7 @@ async def main() -> None:
 
         # Подготавливаем текст для LLM: добавляем явный перечень ссылок из entities
         urls_found = extract_urls(message, text)
-        text_for_llm = text
-        if urls_found:
-            text_for_llm = f"{text}\n\n[links]: {' '.join(urls_found)}"
+        text_for_llm = render_message_markdown(message, text)
 
         # Логируем вход для ИИ в отдельный JSONL (если включено)
         if llm_log_path:
