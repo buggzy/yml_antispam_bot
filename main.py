@@ -52,9 +52,9 @@ class ModerationClient:
             "Тебе дан список правил в формате JSON со структурами {\"prompt\": str}.\n" \
             "Ниже дан текст сообщения.\n\n" \
             "Верни СТРОГО JSON:\n" \
-            "{\n  \"decisions\": [true|false, ...]  // по одному boolean на каждое правило из списка, в том же порядке,\n" \
+            "{\n  \"prohibited\": [true|false, ...]  // по одному boolean на каждое правило из списка, в том же порядке,\n" \
             "  \"rationale\": \"краткое обоснование решения в свободной форме\"\n}\n\n" \
-            "Если массив decisions отсутствует, верни хотя бы {\"decisions\": []}.\n" \
+            "Если массив prohibited отсутствует, верни хотя бы {\"prohibited\": []}.\n" \
             f"Правила: {rules_json}\n" \
             f"Сообщение: {text}"
         )
@@ -87,8 +87,10 @@ class ModerationClient:
             else:
                 data = {"is_forbidden": False}
 
-        # Попытка новой схемы: decisions[] и rationale
-        decisions_raw = data.get("decisions")
+        # Попытка новой схемы: prohibited[] и rationale (поддерживаем decisions как запасной вариант)
+        decisions_raw = data.get("prohibited")
+        if not isinstance(decisions_raw, list):
+            decisions_raw = data.get("decisions")
         rationale: Optional[str] = None
         decisions_out: Optional[List[bool]] = None
         is_forbidden: bool
@@ -144,8 +146,11 @@ async def main() -> None:
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     openai_key = os.getenv("OPENAI_API_KEY")
-    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    system_prompt = "Ты модератор чата. Верни ТОЛЬКО JSON с ключами is_forbidden и reason."
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    system_prompt = (
+        "Ты модератор чата. Возвращай только JSON и строго следуй формату, "
+        "который описывает пользователь в своём сообщении."
+    )
     debug_mode = get_bool_env("DEBUG", False)
 
     logging.basicConfig(
@@ -242,7 +247,7 @@ async def main() -> None:
 
         if debug_mode:
             logging.debug(
-                "Classification result: forbidden=%s reason=%r rationale=%r decisions=%r",
+                "Classification result: forbidden=%s reason=%r rationale=%r prohibited=%r",
                 is_forbidden,
                 reason,
                 rationale,
