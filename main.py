@@ -3,6 +3,7 @@ import logging
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple, Set
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
@@ -152,12 +153,29 @@ async def main() -> None:
         "который описывает пользователь в своём сообщении."
     )
     debug_mode = get_bool_env("DEBUG", False)
+    llm_log_path = os.getenv("LLM_LOG_PATH")  # Если задан, пишем JSONL-логи запросов/ответов ИИ в этот файл
 
     logging.basicConfig(
         level=logging.DEBUG if debug_mode else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logging.info("Starting YML antispam bot: model=%s, debug=%s", openai_model, debug_mode)
+
+    async def append_json_line(path: str, payload: Dict[str, Any]) -> None:
+        """Безопасная запись JSON-объекта одной строкой в файл (JSONL).
+        Выполняется в потоке, чтобы не блокировать event-loop.
+        """
+        try:
+            def _write() -> None:
+                os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+            await _to_thread(_write)
+        except Exception:
+            # Не прерываем работу бота из-за ошибок логирования
+            if debug_mode:
+                logging.exception("Failed to write LLM JSON log")
 
     if not telegram_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
@@ -234,6 +252,24 @@ async def main() -> None:
         if not text.strip():
             return
 
+        # Логируем вход для ИИ в отдельный JSONL (если включено)
+        if llm_log_path:
+            try:
+                await append_json_line(
+                    llm_log_path,
+                    {
+                        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "event": "llm_input",
+                        "chat_id": getattr(message.chat, "id", None),
+                        "user_id": getattr(getattr(message, "from_user", None), "id", None),
+                        "text": text[:4000],
+                        "rules": [r.get("prompt") for r in rules if isinstance(r, dict)],
+                    },
+                )
+            except Exception:
+                if debug_mode:
+                    logging.exception("Failed to log llm_input")
+
         try:
             is_forbidden, reason, rationale, decisions = await moderation.classify(
                 text=text,
@@ -290,6 +326,26 @@ async def main() -> None:
                     pass
             # Нет прав — выходим
             return
+
+        # Логируем ответ ИИ в JSONL (если включено)
+        if llm_log_path:
+            try:
+                await append_json_line(
+                    llm_log_path,
+                    {
+                        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "event": "llm_output",
+                        "chat_id": getattr(message.chat, "id", None),
+                        "user_id": getattr(getattr(message, "from_user", None), "id", None),
+                        "is_forbidden": is_forbidden,
+                        "reason": reason,
+                        "rationale": rationale,
+                        "prohibited": decisions,
+                    },
+                )
+            except Exception:
+                if debug_mode:
+                    logging.exception("Failed to log llm_output")
 
         # Публикуем уведомление и удаляем через 60 секунд
         notice_text = f"сообщение от {user_mention} удалено по причине {hbold(reason_text)}"
